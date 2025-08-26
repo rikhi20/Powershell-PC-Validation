@@ -1,9 +1,9 @@
-
+#!/bin/bash
 
 # ======================================
-#  Mac Validation Script
-#  Version 0.5 Beta
-#  $(date)
+# Mac Validation Script
+# Version 0.2 Beta
+# $(date)
 # ======================================
 
 REPORT="$HOME/Desktop/Mac_Validation_Report.html"
@@ -127,12 +127,22 @@ EOF
 # -------------------------------
 # Application Checks
 # -------------------------------
+# List of applications to check for existence in /Applications (or common subdirectories)
 APPS=(
     "Google Chrome.app"
     "Microsoft Outlook.app"
     "Microsoft Teams.app"
     "Slack.app"
     "Zoom.us.app"
+    "Self Service.app"       # Jamf Self Service
+    "Microsoft Word.app"     # Microsoft Office
+    "Microsoft PowerPoint.app" # Microsoft Office
+    "Microsoft Excel.app"    # Microsoft Office
+    "Jamf Connect.app"       # Jamf Connect
+    "Falcon.app"             # CrowdStrike Falcon (common app name)
+    "CyberArk EPM.app"       # CyberArk (common app name, may vary)
+    "LastPass.app"           # LastPass Desktop App
+    "Firefox.app"            # Mozilla Firefox
 )
 
 cat <<EOF >> "$REPORT"
@@ -149,6 +159,23 @@ for app in "${APPS[@]}"; do
     fi
     echo "<tr><td>$app</td><td>$STATUS</td></tr>" >> "$REPORT"
 done
+
+# --- Specific Zscaler Check ---
+# Define the exact path to Zscaler.app based on your clarification
+ZSCALER_APP_PATH="/Applications/Zscaler/Zscaler.app"
+ZSCALER_PROCESS_NAME="Zscaler" # Common process name for Zscaler
+
+ZSCALER_STATUS="<span class='failure'>Not Found ❌</span>"
+if [ -d "$ZSCALER_APP_PATH" ]; then
+    ZSCALER_STATUS="<span class='success'>Installed (App) ✅</span>"
+    # Further check if the process is running
+    if pgrep -xq "$ZSCALER_PROCESS_NAME"; then
+        ZSCALER_STATUS="<span class='success'>Installed & Running ✅</span>"
+    else
+        ZSCALER_STATUS="<span class='failure'>Installed (App), but not Running ⚠️</span>"
+    fi
+fi
+echo "<tr><td>Zscaler</td><td>$ZSCALER_STATUS</td></tr>" >> "$REPORT"
 
 # -------------------------------
 # HTML Footer
