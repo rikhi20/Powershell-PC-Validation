@@ -34,6 +34,72 @@ progress() {
     echo ""
 }
 
+# Function to get a more human-readable model name
+get_human_readable_model() {
+    local model_id=$(sysctl -n hw.model)
+    local cpu_brand=$(sysctl -n machdep.cpu.brand_string)
+
+    local marketing_name=""
+    local chip_name=""
+
+    # Extract chip name (e.g., "M1", "M2 Pro", "Intel Core i7")
+    if [[ "$cpu_brand" =~ Apple\ (M[0-9].*) ]]; then
+        chip_name="${BASH_REMATCH[1]}"
+    elif [[ "$cpu_brand" =~ Intel\ (Core.*) ]]; then
+        chip_name="${BASH_REMATCH[1]}"
+    else
+        chip_name="$cpu_brand" # Fallback if not Apple Silicon or common Intel
+    fi
+
+    # Basic mapping for common Apple product lines based on model identifier prefix
+    case "$model_id" in
+        MacBookAir*)
+            marketing_name="MacBook Air"
+            ;;
+        MacBookPro*)
+            marketing_name="MacBook Pro"
+            ;;
+        Macmini*)
+            marketing_name="Mac mini"
+            ;;
+        iMac*)
+            marketing_name="iMac"
+            ;;
+        MacPro*)
+            marketing_name="Mac Pro"
+            ;;
+        MacStudio*)
+            marketing_name="Mac Studio"
+            ;;
+        VirtualMac*) # For VMs
+            marketing_name="Virtual Mac"
+            ;;
+        # Add specific model identifiers here if you know what they map to.
+        # Example: if Mac16,8 is a new iMac:
+        # Mac16,8)
+        #    marketing_name="iMac"
+        #    ;;
+        *)
+            # If we don't have a specific marketing name, use a generic one
+            # and rely on the model ID and chip for identification.
+            if [[ "$model_id" =~ ^(MacBook|Mac)[a-zA-Z]* ]]; then
+                marketing_name="Apple Mac" # Generic for unknown MacBooks/Macs
+            else
+                marketing_name="Unknown Mac Model"
+            fi
+            ;;
+    esac
+
+    # Combine them
+    # Prioritize chip if it's Apple Silicon for clarity
+    if [[ "$chip_name" =~ Apple\ M[0-9] ]]; then
+        echo "$marketing_name with $chip_name ($model_id)"
+    else
+        echo "$marketing_name ($model_id) with $chip_name"
+    fi
+}
+
+
 echo "Collecting system information..."
 progress 20
 echo ""
@@ -66,13 +132,32 @@ EOF
 # -------------------------------
 # System Info
 # -------------------------------
+# Get OS product version and build version
+OS_PRODUCT_NAME=$(sw_vers -productName) # e.g., macOS
+OS_PRODUCT_VERSION=$(sw_vers -productVersion) # e.g., 14.0
+OS_BUILD_VERSION=$(sw_vers -buildVersion) # e.g., 23A344
+
+# Get OS marketing name (Sonoma, Ventura, etc.)
+OS_MARKETING_NAME=""
+case "$OS_PRODUCT_VERSION" in
+    15.*) OS_MARKETING_NAME="Sequoia";; # macOS 15 (Sequoia)
+    14.*) OS_MARKETING_NAME="Sonoma";;
+    13.*) OS_MARKETING_NAME="Ventura";;
+    12.*) OS_MARKETING_NAME="Monterey";;
+    11.*) OS_MARKETING_NAME="Big Sur";;
+    10.15*) OS_MARKETING_NAME="Catalina";;
+    10.14*) OS_MARKETING_NAME="Mojave";;
+    10.13*) OS_MARKETING_NAME="High Sierra";;
+    *) OS_MARKETING_NAME="Unknown macOS";;
+esac
+
 cat <<EOF >> "$REPORT"
 <h2>System Information</h2>
 <table>
 <tr><th>Item</th><th>Value</th></tr>
 <tr><td>Hostname</td><td>$(hostname)</td></tr>
-<tr><td>OS Version</td><td>$(sw_vers -productName) $(sw_vers -productVersion) ($(sw_vers -buildVersion))</td></tr>
-<tr><td>Model</td><td>$(sysctl -n hw.model)</td></tr>
+<tr><td>OS Version</td><td>$OS_PRODUCT_NAME $OS_MARKETING_NAME ($OS_PRODUCT_VERSION, build $OS_BUILD_VERSION)</td></tr>
+<tr><td>Model</td><td>$(get_human_readable_model)</td></tr>
 <tr><td>Serial Number</td><td>$(system_profiler SPHardwareDataType | awk '/Serial/ {print $4}')</td></tr>
 <tr><td>Processor</td><td>$(sysctl -n machdep.cpu.brand_string)</td></tr>
 <tr><td>Cores</td><td>$(sysctl -n hw.ncpu)</td></tr>
