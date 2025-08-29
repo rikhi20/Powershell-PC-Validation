@@ -11,7 +11,7 @@
 # --- Welcome Screen ---
 Clear-Host
 $scriptName = "TST PC Validation"
-$version = "0.2 Beta" # Updated version
+$version = "0.7 Beta" # Updated version for focused cert check
 $now = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 Write-Host "================================" -ForegroundColor Cyan
@@ -54,13 +54,33 @@ if ($isDomainJoined) {
 } elseif ($aadJoined) {
     $joinStatus = "AAD Joined"
 }
-
 if ($isMECMManaged) {
     $joinStatus += " / MECM Managed"
 } else {
     $joinStatus += " / Not MECM Managed"
 }
 
+# Get Main Display Resolution
+$displayResolution = ""
+try {
+    # Attempt to get resolution using WMI (often more accurate for primary active display)
+    $display = Get-WmiObject -Namespace root\wmi -Class WmiMonitorResolution -ErrorAction SilentlyContinue | Where-Object {$_.Active -eq $true} | Select-Object -First 1
+    if ($display) {
+        $displayResolution = "$($display.HorizontalPixels)x$($display.VerticalPixels)"
+    } else {
+        # Fallback to System.Windows.Forms.Screen if WMI fails or doesn't find active display
+        # This requires the .NET Framework assembly to be loaded
+        Add-Type -AssemblyName System.Windows.Forms
+        $screen = [System.Windows.Forms.Screen]::PrimaryScreen
+        if ($screen) {
+            $displayResolution = "$($screen.Bounds.Width)x$($screen.Bounds.Height) (Fallback)"
+        } else {
+            $displayResolution = "Not detected or no active display found."
+        }
+    }
+} catch {
+    $displayResolution = "Error getting display resolution: $($_.Exception.Message)"
+}
 
 $SystemInfo = @{
     "Computer Name" = $env:COMPUTERNAME
@@ -75,6 +95,7 @@ $SystemInfo = @{
     "Processor"     = (Get-CimInstance Win32_Processor).Name
     "Total Physical Memory" = "{0:N2} GB" -f ((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     "Device Join Status" = $joinStatus
+    "Main Display Resolution" = $displayResolution # Added display resolution
 }
 
 # --- Progress Helper ---
@@ -82,14 +103,12 @@ function Run-Check($category, $item, $scriptBlock) {
     $global:step++
     $percent = [Math]::Min(100, [int](($global:step / $global:totalSteps) * 100))
     Write-Progress -Activity "Running PC Validation Checks" -Status "$item" -PercentComplete $percent
-
     $result = "Error" # Default to error
     try {
         $result = & $scriptBlock
     } catch {
         $result = "Error: $($_.Exception.Message)" # Capture error message for better debugging
     }
-
     # Add the result to the global $Checks array
     $global:Checks += [PSCustomObject]@{ Category=$category; Item=$item; Result=$result }
 }
@@ -101,7 +120,6 @@ function Test-ApplicationInstalled {
         [string[]]$SearchStrings, # Strings to look for in DisplayName
         [string[]]$ExecutablePaths # Paths to check for existence
     )
-
     # 1. Check common Uninstall Registry Paths
     $uninstallPaths = @(
         "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
@@ -118,7 +136,6 @@ function Test-ApplicationInstalled {
             }
         }
     }
-
     # 2. Check specific executable paths
     foreach ($exePath in $ExecutablePaths) {
         if (Test-Path $exePath -PathType Leaf) {
@@ -162,16 +179,16 @@ $appsToCheck = @(
 
 # Calculate total steps dynamically
 $totalSteps = 0
-$totalSteps += 5 # Security Checks
+$totalSteps += 6 # Security Checks (TPM, BitLocker, WU Service, BIOS, Driver, Corporate Certs)
 $totalSteps += 1 # Network
 $totalSteps += 1 # Language/IME
 $totalSteps += 2 # Browser Versions
 $totalSteps += $appsToCheck.Count # Applications Check
 $totalSteps += 3 # Windows Hello Checks (PIN Activated, Fingerprint Present, IR Camera Present)
-
 $step = 0
 
 # --- Actual Checks Start Here ---
+
 # --- Security Checks ---
 Run-Check "Security" "TPM Presence" {
     (Get-CimInstance -Namespace "Root\CIMv2\Security\MicrosoftTpm" -ClassName Win32_Tpm).ManufacturerID -ne $null
@@ -192,7 +209,7 @@ Run-Check "Security" "BitLocker Status" {
     }
 }
 
-Run-Check "Security" "Windows Update Service Status" { # Renamed check item
+Run-Check "Security" "Windows Update Service Status" {
     try {
         $service = Get-Service -Name "wuauserv" -ErrorAction SilentlyContinue
         if ($service) {
@@ -218,6 +235,62 @@ Run-Check "Security" "Driver Version Check" {
     # This just gets the highest driver version.
     (Get-CimInstance Win32_PnPSignedDriver | Sort-Object DriverVersion -Descending | Select-Object -First 1).DriverVersion
 }
+
+Run-Check "Security" "Corporate IT Root CA Certificate" {
+    $output = @()
+    $certFoundCount = 0
+    # Only this specific certificate is required
+    $requiredCerts = @(
+        "CN=Rakuten Corporate IT Root CA, DC=intra, DC=rakuten, DC=co, DC=jp"
+    )
+
+    try {
+        # Root CAs are typically in the Root store
+        $certsRoot = Get-ChildItem Cert:\LocalMachine\Root -ErrorAction SilentlyContinue
+        # Also check My store just in case, though less common for a Root CA
+        $certsMy = Get-ChildItem Cert:\LocalMachine\My -ErrorAction SilentlyContinue
+        # Intermediate CAs store is unlikely for a Root CA itself, but good to keep in mind
+        $certsIntermediate = Get-ChildItem Cert:\LocalMachine\CA -ErrorAction SilentlyContinue
+
+        # Combine all relevant collections into a single, flat array
+        $certsToSearch = @($certsRoot) + @($certsMy) + @($certsIntermediate)
+
+        foreach ($requiredCertCN in $requiredCerts) {
+            # Extract a more readable name from the full subject string
+            $displayCertName = $requiredCertCN
+            if ($requiredCertCN.StartsWith("CN=")) {
+                $displayCertName = ($requiredCertCN -split ',')[0] -replace 'CN=', ''
+            } # For a root CA, it's usually a simple CN.
+
+            $foundCert = $certsToSearch | Where-Object { $_.Subject -eq $requiredCertCN } | Select-Object -First 1
+
+            if ($foundCert) {
+                $certFoundCount++
+                $status = "Present"
+                $expiryDate = $foundCert.NotAfter.ToString("yyyy-MM-dd") # Format expiry date
+                if ($foundCert.NotAfter -lt (Get-Date)) {
+                    $status = "EXPIRED"
+                } elseif ($foundCert.NotAfter -lt ((Get-Date).AddDays(30))) {
+                    $status = "Expires Soon (<30 days)"
+                }
+                $output += "[+] Found: $($displayCertName) (Expires: $expiryDate, Status: $status)"
+            } else {
+                $output += "[-] Missing: $displayCertName"
+            }
+        }
+
+        if ($certFoundCount -eq $requiredCerts.Count) {
+            "All Required Corporate Certificates Found: $($output -join '<br>')"
+        } elseif ($certFoundCount -gt 0) {
+            "Some Corporate Certificates Missing or Expired:<br>$($output -join '<br>')"
+        } else {
+            "No Required Corporate Certificates Found.<br>$($output -join '<br>')"
+        }
+    } catch {
+        "Error checking certificates: $($_.Exception.Message)"
+    }
+}
+
 
 # --- Network ---
 Run-Check "Network" "Intra Reachable" {
@@ -248,7 +321,6 @@ Run-Check "Browser" "Chrome Version" {
 
 Run-Check "Browser" "Edge Version" {
     $edgeExePath = $null
-
     # --- Attempt 1: Check App Paths Registry ---
     try {
         $appPath = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe" -ErrorAction SilentlyContinue)."(Default)"
@@ -258,7 +330,6 @@ Run-Check "Browser" "Edge Version" {
     } catch {
         # Ignore error, proceed to next method
     }
-
     # --- Attempt 2: Fallback to Get-ChildItem -Recurse (if App Paths failed) ---
     if (-not $edgeExePath) {
         $edgeBasePaths = @(
@@ -276,7 +347,6 @@ Run-Check "Browser" "Edge Version" {
             }
         }
     }
-
     if ($edgeExePath -and (Test-Path $edgeExePath -PathType Leaf)) {
         (Get-Item $edgeExePath).VersionInfo.ProductVersion
     } else {
@@ -317,7 +387,6 @@ Run-Check "Windows Hello" "Fingerprint Module Present" {
                               $_.FriendlyName -like "*Synaptics*") -and # Added Synaptics
                              $_.Status -eq "OK" # Check if the device is enabled and working
                          } | Select-Object -First 1
-
     if ($fingerprintSensor) {
         "Present (Device: $($fingerprintSensor.FriendlyName))"
     } else {
@@ -334,7 +403,6 @@ Run-Check "Windows Hello" "Facial Recognition Capable IR Camera Present" {
                      $_.FriendlyName -like "*Windows Hello Face*") -and
                     $_.Status -eq "OK" # Check if the device is enabled and working
                 } | Select-Object -First 1
-
     if ($irCamera) {
         "Present (Device: $($irCamera.FriendlyName))"
     } else {
@@ -361,7 +429,7 @@ $html = @"
     body {
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         margin: 20px;
-        background-color: #f4f7f6; /* Light gray background */
+        background-color: #f8f8f8; /* Very light gray background for contrast */
         color: #333;
     }
     .container {
@@ -370,19 +438,19 @@ $html = @"
         background-color: #ffffff;
         padding: 30px;
         border-radius: 8px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15); /* Stronger shadow */
     }
     h1, h2, h3 {
-        color: #0056b3; /* Darker blue for headers */
+        color: #DC143C; /* Crimson Red for headers */
         border-bottom: 2px solid #e0e0e0;
         padding-bottom: 5px;
         margin-top: 25px;
     }
     h1 {
         text-align: center;
-        color: #004085;
-        font-size: 2.2em;
-        margin-bottom: 20px;
+        color: #B22222; /* Firebrick for main title */
+        font-size: 2.5em;
+        margin-bottom: 25px;
     }
     p {
         line-height: 1.6;
@@ -391,24 +459,24 @@ $html = @"
         width: 100%;
         border-collapse: collapse;
         margin-top: 15px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+        box-shadow: 0 2px 6px rgba(0,0,0,0.08); /* Slightly stronger table shadow */
     }
     th, td {
-        border: 1px solid #ddd;
+        border: 1px solid #eee; /* Lighter border */
         padding: 12px 15px;
         text-align: left;
     }
     th {
-        background-color: #e9ecef; /* Light gray for table headers */
-        color: #495057;
+        background-color: #F5F5F5; /* Very light gray for table headers */
+        color: #555;
         font-weight: bold;
         text-transform: uppercase;
     }
     tr:nth-child(even) {
-        background-color: #f8f9fa; /* Lighter gray for even rows */
+        background-color: #FDFDFD; /* Almost white for even rows */
     }
     tr:hover {
-        background-color: #e2f0fb; /* Light blue on hover */
+        background-color: #FFF0F5; /* Light pink on hover */
     }
     /* Status Specific Colors */
     .status-positive { /* Green for positive results */
@@ -416,10 +484,10 @@ $html = @"
         font-weight: bold;
     }
     .status-negative { /* Red for negative results */
-        color: #dc3545;
+        color: #DC143C; /* Crimson Red for negative */
         font-weight: bold;
     }
-    .status-warning { /* Yellow/Orange for warnings */
+    .status-warning { /* Orange for warnings */
         color: #ffc107;
         font-weight: bold;
     }
@@ -427,8 +495,8 @@ $html = @"
         color: #6c757d;
         font-weight: bold;
     }
-    .status-info { /* Cyan/Info blue for general info (like versions) */
-        color: #17a2b8;
+    .status-info { /* Darker gray for general info (less emphasis) */
+        color: #555;
     }
 </style>
 </head>
@@ -473,9 +541,12 @@ foreach ($check in $Checks) {
         $resultText -eq "Not Activated" -or # Exact match
         $resultText -eq "Not Present" -or # Exact match
         $resultText -like "*Failed*" -or
-        $resultText -like "Service Stopped*" -or # Added for Windows Update Service
-        $resultText -like "Service Disabled*" -or # Added for Windows Update Service
-        $resultText -like "Service Not Found*") { # Added for Windows Update Service
+        $resultText -like "Service Stopped*" -or
+        $resultText -like "Service Disabled*" -or
+        $resultText -like "Service Not Found*" -or
+        $resultText -like "*EXPIRED*" -or # Added for certificate check
+        $resultText -like "[-] Missing*" # Modified for certificate check
+        ) {
         $resultClass = "status-negative"
     }
     # 2. Error results (Grey)
@@ -485,7 +556,10 @@ foreach ($check in $Checks) {
     # 3. Warning results (Yellow/Orange)
     elseif ($resultText -like "*Detected (Not Fully Encrypted)*" -or # Specific warning for BitLocker
             $resultText -like "*Warning*" -or
-            $resultText -like "*Partial*") {
+            $resultText -like "*Partial*" -or
+            $resultText -like "*Expires Soon*" -or # Added for certificate check
+            $resultText -like "Some Corporate Certificates Missing*" # Added for certificate check summary
+            ) {
         $resultClass = "status-warning"
     }
     # 4. Positive results (Green) - Check these after all negative/error/warning
@@ -498,7 +572,10 @@ foreach ($check in $Checks) {
             $resultText -like "*Present (Device:*" -or # Specific for "Present (Device: ...)"
             $resultText -eq "Present" -or # Exact match for "Present"
             $resultText -like "*Ping Successful*" -or
-            $resultText -like "Service Running*") { # Added for Windows Update Service
+            $resultText -like "Service Running*" -or
+            $resultText -like "[+] Found:*" -or # Modified for certificate check
+            $resultText -like "All Required Corporate Certificates Found*" # Added for certificate check summary
+            ) {
         $resultClass = "status-positive"
     }
     # 5. All other results (Info/Cyan - default)
