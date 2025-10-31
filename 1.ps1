@@ -1,6 +1,3 @@
-Okay, here is the full, corrected, and improved PowerShell script for automated PC validation. I've incorporated the fix for the `param` statement error and included all the enhancements discussed previously.
-
-```powershell
 <#
 .SYNOPSIS
     Automated New PC Validation Script
