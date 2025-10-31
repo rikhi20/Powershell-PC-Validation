@@ -359,20 +359,54 @@ Run-Check "Windows Hello" "Windows Hello PIN Activated" {
     # Checks if a Windows Hello PIN is setup and enabled for the current user.
     # A value of 1 for IsEnabled means a PIN is set up.
     try {
-        $regPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin"
-        # Check if the registry path exists for the current user
-        if (Test-Path $regPath) {
-            $isEnabled = (Get-ItemProperty -Path $regPath -Name "IsEnabled" -ErrorAction SilentlyContinue).IsEnabled
-            if ($isEnabled -eq 1) {
+        $sid = $null
+        # Try to get SID from AD for domain users
+        $adUser = Get-ADUser -Identity $env:USERNAME -Properties SID -ErrorAction SilentlyContinue
+        if ($adUser) {
+            $sid = $adUser.SID.Value
+        } else {
+            # Fallback for local users or if Get-ADUser fails (e.g., not domain joined, AD module not present)
+            $localUser = Get-CimInstance Win32_UserAccount | Where-Object {$_.Name -eq $env:USERNAME -and $_.LocalAccount -eq $true}
+            if ($localUser) {
+                $sid = $localUser.SID
+            }
+        }
+
+        if ($sid) {
+            # Path for Windows Hello for Business (key provisioning)
+            $whfbRegPath = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\WinTrust\Trust Providers\Software Publishing\State"
+            # Path for consumer Windows Hello (PIN provisioning)
+            $pinRegPath = "Registry::HKEY_USERS\$sid\Software\Microsoft\Windows\CurrentVersion\Explorer\ControlPanel\Storage\Pin"
+
+            $isWhfbProvisioned = $false
+            $isPinProvisioned = $false
+
+            # Check for Windows Hello for Business provisioning
+            if (Test-Path $whfbRegPath) {
+                $stateValue = (Get-ItemProperty -LiteralPath $whfbRegPath -Name "State" -ErrorAction SilentlyContinue).State
+                # State value 0x70000 indicates WHfB key provisioning completed
+                if ($stateValue -eq 0x70000) {
+                    $isWhfbProvisioned = $true
+                }
+            }
+
+            # Check for consumer PIN provisioning
+            if (Test-Path $pinRegPath) {
+                # The presence of this key, specifically the "Pin" subkey,
+                # usually indicates a PIN has been set up.
+                $isPinProvisioned = $true
+            }
+
+            if ($isWhfbProvisioned -or $isPinProvisioned) {
                 "Activated"
             } else {
                 "Not Activated"
             }
         } else {
-            "Not Activated (Registry key not found for current user)"
+            "Not Activated (Could not determine user SID)"
         }
     } catch {
-        "Not Activated (Error accessing registry: $($_.Exception.Message))"
+        "Not Activated (Error checking PIN status: $($_.Exception.Message))"
     }
 }
 
