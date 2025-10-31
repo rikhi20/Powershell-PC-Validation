@@ -356,25 +356,51 @@ Run-Check "Browser" "Edge Version" {
 
 # --- Windows Hello Checks ---
 Run-Check "Windows Hello" "Windows Hello PIN Activated" {
-    # Checks if a Windows Hello PIN is setup and enabled for the current user.
-    # A value of 1 for IsEnabled means a PIN is set up.
-    try {
-        $regPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\LogonUI\NgcPin"
-        # Check if the registry path exists for the current user
-        if (Test-Path $regPath) {
-            $isEnabled = (Get-ItemProperty -Path $regPath -Name "IsEnabled" -ErrorAction SilentlyContinue).IsEnabled
-            if ($isEnabled -eq 1) {
-                "Activated"
-            } else {
-                "Not Activated"
+    Run-Check "Windows Hello" "Windows Hello PIN Activated" {
+
+        # Get the Security Identifier (SID) for the current user
+    
+        $userSID = ([System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value)
+    
+        # Define the registry path for the Windows Hello PIN credential provider
+    
+        $registryPath = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{D6886603-9D2F-4EB2-B667-1971041FA96B}\$userSID"
+    
+        # Check if the registry key for the user's SID exists
+    
+        if (Test-Path $registryPath) {
+    
+            # If the key exists, check the 'LogonCredsAvailable' value
+    
+            try {
+    
+                $value = Get-ItemProperty -Path $registryPath -Name "LogonCredsAvailable" -ErrorAction Stop
+    
+                if ($value.LogonCredsAvailable -eq 1) {
+    
+                    "Activated (LogonCredsAvailable = 1)"
+    
+                } else {
+    
+                    "Not Activated (LogonCredsAvailable = $($value.LogonCredsAvailable))"
+    
+                }
+    
             }
+    
+            catch {
+    
+                "Not Activated (LogonCredsAvailable value not found or error: $($_.Exception.Message))"
+    
+            }
+    
         } else {
-            "Not Activated (Registry key not found for current user)"
+    
+            "Not Activated (No Windows Hello for Business enrollment found in registry for current user.)"
+    
         }
-    } catch {
-        "Not Activated (Error accessing registry: $($_.Exception.Message))"
+    
     }
-}
 
 Run-Check "Windows Hello" "Fingerprint Module Present" {
     # Checks for the presence of a fingerprint reader device.
